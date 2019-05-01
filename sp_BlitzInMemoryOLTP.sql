@@ -1,21 +1,3 @@
-DECLARE @msg NVARCHAR(MAX) = N'';
-
-	-- Must be a compatible, on-prem version of SQL (2014+)
-IF  (	(SELECT SERVERPROPERTY ('EDITION')) <> 'SQL Azure' 
-	AND (SELECT PARSENAME(CONVERT(NVARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) < 12
-	)
-	-- or Azure Database (not Azure Data Warehouse), running at database compat level 120+
-OR	(	(SELECT SERVERPROPERTY ('EDITION')) = 'SQL Azure'
-	AND (SELECT SERVERPROPERTY ('ENGINEEDITION')) = 5
-	AND (SELECT [compatibility_level] FROM sys.databases WHERE [name] = DB_NAME()) < 120
-	)
-BEGIN
-	SELECT @msg = N'Sorry, sp_BlitzInMemoryOLTP doesn''t work on versions of SQL prior to 2014.' + REPLICATE(CHAR(13), 7933);
-	PRINT @msg;
-	RETURN;
-END;
-
-
 IF OBJECT_ID('dbo.sp_BlitzInMemoryOLTP', 'P') IS NULL
 EXECUTE ('CREATE PROCEDURE dbo.sp_BlitzInMemoryOLTP AS SELECT 1;');
 GO
@@ -191,6 +173,8 @@ BEGIN TRY
     (
          [object] NVARCHAR(MAX)
         ,databaseName NVARCHAR(MAX)
+		-- dadeniji 20190430
+		,[schema]     sysname not null
         ,tableName NVARCHAR(MAX)
         ,[rowCount] INT
         ,durability_desc NVARCHAR(MAX)
@@ -205,6 +189,7 @@ BEGIN TRY
     (
          [object] NVARCHAR(MAX)
         ,databaseName NVARCHAR(MAX)
+		,[schema]  sysname not null
         ,tableName NVARCHAR(MAX)
         ,indexName NVARCHAR(MAX)
         ,memory_consumer_id INT
@@ -219,7 +204,7 @@ BEGIN TRY
     (
          [object] NVARCHAR(MAX)
         ,databaseName NVARCHAR(MAX)
-        ,[Schema] NVARCHAR(MAX)
+        ,[schema] NVARCHAR(MAX)
         ,TableName NVARCHAR(MAX)
         ,indexName NVARCHAR(MAX)
         ,totalBucketCount BIGINT
@@ -228,13 +213,21 @@ BEGIN TRY
         ,avg_ChainLength INT
         ,max_ChainLength BIGINT
         ,[Free buckets status] NVARCHAR(MAX)
-        ,[avg_chain_length status] BIGINT
-    );
+
+		-- Msg 8114, Level 16, State 5, Line 19
+		-- Error converting data type varchar to bigint.
+		-- due to matching entries such as avg_chain_length has many collisions!
+
+        --,[avg_chain_length status] BIGINT
+		,[avg_chain_length status] VARCHAR(600)
+    
+	);
 
     DECLARE @resultsIndexCount TABLE
     (
          [object] NVARCHAR(MAX)
         ,databaseName NVARCHAR(MAX)
+		,[schema]     sysname not null
         ,tableName NVARCHAR(MAX)
         ,indexCount INT
     );
@@ -242,8 +235,9 @@ BEGIN TRY
     DECLARE @resultsNativeModules TABLE
     (
          [object] NVARCHAR(MAX)
-        ,Name NVARCHAR(MAX)
         ,databaseName NVARCHAR(MAX)
+		,[schema]     sysname not null
+        ,Name NVARCHAR(MAX)
         ,[type] NVARCHAR(MAX)
         ,[definition] NVARCHAR(MAX)
     );
@@ -252,6 +246,7 @@ BEGIN TRY
     (
         [object] NVARCHAR(MAX)
         ,databaseName NVARCHAR(MAX)
+		,[schema] sysname not null
         ,moduleName NVARCHAR(MAX)
         ,object_id INT
     );
@@ -672,6 +667,8 @@ BEGIN TRY
                     , ' N'''
                     ,dbName
                     ,''' AS databaseName'
+					-- dadeniji 2019-04-30
+					,', s.name as [schema] '
                     ,', b.name AS tableName 
                     , p.rows AS [rowCount]
                     ,durability_desc '
@@ -732,6 +729,7 @@ BEGIN TRY
                         ,dbName
                         ,''''
                         ,' AS databaseName
+						,s.name AS [schema]
                         ,t.name AS tableName
                         ,i.name AS indexName
                         ,c.memory_consumer_id
@@ -745,7 +743,10 @@ BEGIN TRY
                     ,'.sys.dm_db_xtp_memory_consumers c
                     INNER JOIN '
                     ,dbName
-                    ,'.sys.tables t ON t.object_id = c.object_id'
+                    ,'.sys.tables t ON t.object_id = c.object_id '
+                    , 'INNER JOIN '
+                    ,dbName
+                    ,'.sys.schemas s ON t.schema_id = s.schema_id '
                     ,CASE WHEN @MSSQLVersion > 12 THEN ' INNER JOIN sys.memory_optimized_tables_internal_attributes a ON a.object_id = c.object_id
                                                                             AND a.xtp_object_id = c.xtp_object_id' ELSE NULL END
                     ,@crlf + ' LEFT JOIN '
@@ -767,7 +768,7 @@ BEGIN TRY
                 SELECT @sql += CONCAT(' AND t.name = ', '''', @tableName, '''');
             END;
 
-            SELECT @sql += ' ORDER BY tableName, indexName;'
+            SELECT @sql += ' ORDER BY [schema], tableName, indexName;'
 
             IF @debug = 1
             PRINT('--List indexes on memory-optimized tables in this database' + @crlf + @sql + @crlf);
@@ -810,7 +811,7 @@ BEGIN TRY
                        ,dbName
                        ,''''
                        ,' AS databaseName'
-                       ,', sch.name AS [Schema] '
+                       ,', sch.name AS [schema] '
                        ,', t.name AS tableName 
                          ,i.name AS [indexName]
                          ,h.total_bucket_count AS totalBucketCount
@@ -878,6 +879,7 @@ BEGIN TRY
                     ,dbName
                     ,''''
                     ,' AS databaseName
+					,s.name AS [schema]
                     ,t.name AS tableName
                     ,COUNT(DISTINCT i.index_id) AS indexCount
                     FROM '
@@ -886,6 +888,9 @@ BEGIN TRY
                     INNER JOIN '
                     ,dbName
                     ,'.sys.tables t ON t.object_id = c.object_id'
+                    , ' INNER JOIN '
+                    ,dbName
+                    ,'.sys.schemas s ON t.schema_id = s.schema_id '
                     ,CASE WHEN @MSSQLVersion > 12 THEN
                     CONCAT(' INNER JOIN ', dbName ,'.sys.memory_optimized_tables_internal_attributes a ON a.object_id = c.object_id
                                                                         AND a.xtp_object_id = c.xtp_object_id') ELSE NULL END 
@@ -910,8 +915,14 @@ BEGIN TRY
             END;
 
             SELECT @sql +=
-                     ' GROUP BY t.name
-                       ORDER BY t.name';
+                     ' GROUP BY 
+							  	  s.name
+								, t.name
+            
+                       ORDER BY 
+								  s.name
+								, t.name
+					   ';
 
             IF @debug = 1
             PRINT('--Count of indexes per table in this database' + @crlf + @sql + @crlf);
@@ -952,17 +963,22 @@ BEGIN TRY
                         ,dbName
                         ,''''
                         ,' AS databaseName
-                         ,A.name
+						 , s.name 
+                         , A.name
                          ,CASE A.type
                             WHEN ''FN'' THEN ''Function''
                             WHEN ''P'' THEN ''Procedure''
                             WHEN ''TR'' THEN ''Trigger''
+							WHEN ''IF'' THEN ''Function (Inline Table Value)''
                            END AS type
                          ,B.definition AS [definition]
                          FROM '
                         , dbName
-                        ,'.sys.all_objects AS A
-                         INNER JOIN '
+                        ,'.sys.all_objects AS A '
+                        ,' INNER JOIN '
+                        ,dbName
+                        ,'.sys.schemas AS s ON s.schema_id = A.schema_id '
+                        ,' INNER JOIN '
                         ,dbName
                         ,'.sys.sql_modules AS B ON B.object_id = A.object_id
                         WHERE UPPER(B.definition) LIKE ''%NATIVE_COMPILATION%''
@@ -1036,7 +1052,8 @@ BEGIN TRY
                         ,dbName
                         ,''''
                         ,' AS databaseName
-                       ,name AS moduleName
+                       ,s.name as [schema]
+					   ,procedures.name AS moduleName
                        ,procedures.object_id
                         FROM '
                         ,dbName
@@ -1044,7 +1061,15 @@ BEGIN TRY
                         INNER JOIN '
                         ,dbName
                         ,'.sys.procedures ON procedures.object_id = all_sql_modules.object_id
-                        INNER JOIN nativeModuleObjectID ON nativeModuleObjectID.object_id = procedures.object_id'
+                        INNER JOIN nativeModuleObjectID 
+							ON nativeModuleObjectID.object_id = procedures.object_id '
+						, ' INNER JOIN '
+						,dbName
+						,'.sys.objects so on so.object_id = procedures.object_id '
+						, ' INNER JOIN '
+						,dbName
+						,'.sys.schemas s on s.schema_id = so.object_id '
+
                     )
                 FROM #MemoryOptimizedDatabases
                 WHERE rowNumber = @dbCounter;
@@ -1291,7 +1316,7 @@ BEGIN TRY
                         ,' N'''
                         ,dbName
                         ,''' AS databaseName,' 
-                        ,'SCHEMA_NAME(tt.schema_id) AS [Schema]
+                        ,'stt.[name] AS [Schema]
                               ,tt.name AS [Name]
                         FROM '
                         ,dbName
